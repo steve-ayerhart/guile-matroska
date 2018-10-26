@@ -19,21 +19,31 @@
          (cons (parse-element port)
                (parse-elements port))]))
 
+(define (encoded-size byte)
+  (cond [(not (= 0 (bitwise-and #x80 byte)))
+         (values (bitwise-and #x7F byte) 1)]
+        [(not (= 0 (bitwise-and #x40 byte)))
+         (values (bitwise-and #x3F byte) 2)]
+        [(not (= 0 (bitwise-and #x20 byte)))
+         (values (bitwise-and #x1F byte) 3)]
+        [(not (= 0 (bitwise-and #x10 byte)))
+         (values (bitwise-and #x0F byte) 4)]
+        [(not (= 0 (bitwise-and #x08 byte)))
+         (values (bitwise-and #x07 byte) 5)]
+        [(not (= 0 (bitwise-and #x04 byte)))
+         (values (bitwise-and #x03 byte) 6)]
+        [(not (= 0 (bitwise-and #x02 byte)))
+         (values (bitwise-and #x01 byte) 7)]
+        [(not (= 0 (bitwise-and #x01 byte)))
+         (values (bitwise-and #x00 byte) 8)]
+        [else (error 'parse-data-len
+                     "not a legal data-len beginning byte: ~s" byte)]))
+
 (define (parse-element port)
   (define first-byte (get-u8 port))
 
   (receive (header-id-first-byte header-len)
-      (cond [(not (= 0 (bitwise-and #x80 first-byte)))
-             (values (bitwise-and #x7f first-byte) 1)]
-            [(not (= 0 (bitwise-and #x40 first-byte)))
-             (values (bitwise-and #x3f first-byte) 2)]
-            [(not (= 0 (bitwise-and #x20 first-byte)))
-             (values (bitwise-and #x1f first-byte) 3)]
-            [(not (= 0 (bitwise-and #x10 first-byte)))
-             (values (bitwise-and #x0f first-byte) 4)]
-            [else (error 'parse-element
-                         "not a legal header-id beginning byte: ~s"
-                         first-byte)])
+      (encoded-size first-byte)
     (define header-followup-bytes (get-bytevector-n port (- header-len 1)))
 
     (when (< (bytevector-length header-followup-bytes) (- header-len 1))
@@ -58,24 +68,8 @@
   (define first-byte (get-u8 port))
 
   (receive (data-len-first-byte data-len-len)
-      (cond [(not (= 0 (bitwise-and #x80 first-byte)))
-             (values (bitwise-and #x7F first-byte) 1)]
-            [(not (= 0 (bitwise-and #x40 first-byte)))
-             (values (bitwise-and #x3F first-byte) 2)]
-            [(not (= 0 (bitwise-and #x20 first-byte)))
-             (values (bitwise-and #x1F first-byte) 3)]
-            [(not (= 0 (bitwise-and #x10 first-byte)))
-             (values (bitwise-and #x0F first-byte) 4)]
-            [(not (= 0 (bitwise-and #x08 first-byte)))
-             (values (bitwise-and #x07 first-byte) 5)]
-            [(not (= 0 (bitwise-and #x04 first-byte)))
-             (values (bitwise-and #x03 first-byte) 6)]
-            [(not (= 0 (bitwise-and #x02 first-byte)))
-             (values (bitwise-and #x01 first-byte) 7)]
-            [(not (= 0 (bitwise-and #x01 first-byte)))
-             (values (bitwise-and #x00 first-byte) 8)]
-            [else (error 'parse-data-len
-                         "not a legal data-len beginning byte: ~s" first-byte)])
+      (encoded-size first-byte)
+
     (define followup-data-len-bytes (get-bytevector-n port (- data-len-len 1)))
 
     (when (< (bytevector-length followup-data-len-bytes) (- data-len-len 1))
@@ -103,4 +97,4 @@
   (if (null? l)
       accum
       (bytes->uint (cdr l)
-                   (+ (first l) (bitwise-arithmetic-shift accum 8)))))
+                   (+ (car l) (bitwise-arithmetic-shift accum 8)))))
