@@ -4,97 +4,71 @@
   #:use-module (ice-9 binary-ports)
   #:use-module (ice-9 receive))
 
-(define (ebml-read in)
-  (cond [(bytevector? in)
-         'bytevector]
-        [(port? in)
-         'port]
-        [else
-         (error "don't know how to open")]))
+(define (read-element-id port)
+  (define first-byte (lookahead-u8 port))
 
+  (cond ((not (= 0 (bitwise-and #x80 first-byte)))
+         (get-u8 port))
+        ((not (= 0 (bitwise-and #x40 first-byte)))
+         (bytevector-uint-ref (get-bytevector-n port 2) 0 (endianness big) 2))
+        ((not (= 0 (bitwise-and #x20 first-byte)))
+         (let ((bv (get-bytevector-n port 3)))
+           (+ (* (bytevector-u8-ref bv 0) (expt 2 16))
+              (bytevector-uint-ref bv 1 (endianness big) 2))))
+        ((not (= 0 (bitwise-and #x10 first-byte)))
+         (bytevector-uint-ref (get-bytevector-n port 4) 0 (endianness big) 4))
+        (else
+         (error 'read-element-id
+                "not an Element ID"))))
 
-(define (parse-elements port)
-  (cond [(eof-object? (lookahead-u8 port))]
-        [else
-         (cons (parse-element port)
-               (parse-elements port))]))
+(define (read-element-length port)
+  (define first-byte (lookahead-u8 port))
 
-(define (encoded-size byte)
-  (cond [(not (= 0 (bitwise-and #x80 byte)))
-         (values (bitwise-and #x7F byte) 1)]
-        [(not (= 0 (bitwise-and #x40 byte)))
-         (values (bitwise-and #x3F byte) 2)]
-        [(not (= 0 (bitwise-and #x20 byte)))
-         (values (bitwise-and #x1F byte) 3)]
-        [(not (= 0 (bitwise-and #x10 byte)))
-         (values (bitwise-and #x0F byte) 4)]
-        [(not (= 0 (bitwise-and #x08 byte)))
-         (values (bitwise-and #x07 byte) 5)]
-        [(not (= 0 (bitwise-and #x04 byte)))
-         (values (bitwise-and #x03 byte) 6)]
-        [(not (= 0 (bitwise-and #x02 byte)))
-         (values (bitwise-and #x01 byte) 7)]
-        [(not (= 0 (bitwise-and #x01 byte)))
-         (values (bitwise-and #x00 byte) 8)]
-        [else (error 'parse-data-len
-                     "not a legal data-len beginning byte: ~s" byte)]))
+  (cond ((not (= 0 (bitwise-and #x80 first-byte)))
+         (bitwise-xor (get-u8 port) #x80))
 
-(define (parse-element port)
-  (define first-byte (get-u8 port))
+        ((not (= 0 (bitwise-and #x40 first-byte)))
+         (let ((bv (get-bytevector-n port 2)))
+           (bytevector-u8-set! bv 0 (bitwise-xor #x40 first-byte))
+           (bytevector-uint-ref bv 0 (endianness big) 2)))
 
-  (receive (header-id-first-byte header-len)
-      (encoded-size first-byte)
-    (define header-followup-bytes (get-bytevector-n port (- header-len 1)))
+        ((not (= 0 (bitwise-and #x20 first-byte)))
+         (let ((bv (get-bytevector-n port 3)))
+           (+ (* (bitwise-xor #x20 (bytevector-u8-ref bv 0)) (expt 2 16))
+              (bytevector-uint-ref bv 1 (endianness big) 2))))
 
-    (when (< (bytevector-length header-followup-bytes) (- header-len 1))
-      (error 'parse-element
-             "port containing complete header id"
-             0 port))
+        ((not (= 0 (bitwise-and #x10 first-byte)))
+         (let ((bv (get-bytevector-n port 4)))
+           (bytevector-u8-set! bv 0 (bitwise-xor #x10 first-byte))
+           (bytevector-uint-ref bv 0 (endianness big) 4)))
 
+        ((not (= 0 (bitwise-and #x08 first-byte)))
+         (let ((bv (get-bytevector-n port 5)))
+           (+ (* (bitwise-xor #x08 (bytevector-u8-ref bv 0)) (expt 2 32))
+              (bytevector-uint-ref bv 1 (endianness big) 4))))
 
-    (let* ((other-bits (bytevector->u8-list header-followup-bytes))
-          (header-id (+ (bitwise-arithmetic-shift header-id-first-byte
-                                          (* (length other-bits) 8))
-                        (bytes->uint other-bits 0))))
+        ((not (= 0 (bitwise-and #x04 first-byte)))
+         (let ((bv (get-bytevector-n port 6)))
+           (+ (* (bitwise-xor #x04 (bytevector-uint-ref bv 0 (endianness big) 2)) (expt 2 32))
+              (bytevector-uint-ref bv 2 (endianness big) 4))))
 
-      (when (= header-id (- (expt 2 (* header-len 7)) 1))
-        (error 'parse-element
-               "non-reserved header id"
-               header-id))
+        ((not (= 0 (bitwise-and #x02 first-byte)))
+         (let ((bv (get-bytevector-n port 7)))
+           (+ (* (bitwise-xor #x02 (bytevector-u8-ref bv 0)) (expt 2 48))
+              (* (bytevector-uint-ref bv 1 (endianness big) 2) (expt 2 32))
+              (bytevector-uint-ref bv 3 (endianness big) 4))))
 
-      (parse-data-len port header-id))))
+        ((not (= 0 (bitwise-and #x01 first-byte)))
+         (let ((bv (get-bytevector-n port 8)))
+           (bytevector-u8-set! bv 0 (bitwise-xor #x01 first-byte))
+           (bytevector-uint-ref bv 0 (endianness big) 8)))
 
-(define (parse-data-len port header-id)
-  (define first-byte (get-u8 port))
+        (else
+         (error 'read-element-length
+                "not an Element length"))))
 
-  (receive (data-len-first-byte data-len-len)
-      (encoded-size first-byte)
-
-    (define followup-data-len-bytes (get-bytevector-n port (- data-len-len 1)))
-
-    (when (< (bytevector-length followup-data-len-bytes) (- data-len-len 1))
-      (error 'parse-data-len 
-             "port containing complete data length"
-             0 port header-id))
-
-    (let* ((other-bits (bytevector->u8-list followup-data-len-bytes))
-          (data-len (+ (bitwise-arithmetic-shift data-len-first-byte
-                                         (* (length other-bits) 8))
-                       (bytes->uint other-bits 0))))
-      (when (= data-len (- (expt 2 (* data-len-len 7)) 1))
-        (error "reserved ata length id: ~s for data length len: ~s"
-               data-len data-len-len))
-
-      (let ((data-bytes (get-bytevector-n port data-len)))
-        (when (< (bytevector-length data-bytes) (- data-len 1))
-          (error 'parse-data-len
-                 "port containing complete data"
-                 0 port header-id))
-
-        (list header-id data-bytes)))))
-
-(define (bytes->uint l accum)
-  (if (null? l)
-      accum
-      (bytes->uint (cdr l)
-                   (+ (car l) (bitwise-arithmetic-shift accum 8)))))
+(define (read-element port)
+  (let ((element-id (read-element-id port))
+        (element-length (read-element-length port)))
+    (format #t "length: ~a\n" element-length)
+    (cons element-id (get-bytevector-n port element-length))))
