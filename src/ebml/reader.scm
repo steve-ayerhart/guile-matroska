@@ -2,73 +2,97 @@
   #:use-module (rnrs bytevectors)
   #:use-module (rnrs arithmetic bitwise)
   #:use-module (ice-9 binary-ports)
-  #:use-module (ice-9 receive))
+  #:use-module (ice-9 receive)
+  #:use-module (sxml simple)
+  #:use-module (sxml xpath)
+  #:use-module (sxml match)
 
-(define (read-element-id port)
+  #:export (parse-element-id
+            read-matroska-file))
+
+(define (get-element-id port)
   (define first-byte (lookahead-u8 port))
+  (define id-length
+    (cond ((logtest #x80 first-byte) 1)
+          ((logtest #x40 first-byte) 2)
+          ((logtest #x20 first-byte) 3)
+          ((logtest #x10 first-byte) 4)
+          (else
+           (error 'parse-element-id
+                  "not an Element ID"))))
+  (bytevector-uint-ref
+   (get-bytevector-n port id-length) 0 (endianness big) id-length))
 
-  (cond ((not (= 0 (bitwise-and #x80 first-byte)))
-         (get-u8 port))
-        ((not (= 0 (bitwise-and #x40 first-byte)))
-         (bytevector-uint-ref (get-bytevector-n port 2) 0 (endianness big) 2))
-        ((not (= 0 (bitwise-and #x20 first-byte)))
-         (let ((bv (get-bytevector-n port 3)))
-           (+ (* (bytevector-u8-ref bv 0) (expt 2 16))
-              (bytevector-uint-ref bv 1 (endianness big) 2))))
-        ((not (= 0 (bitwise-and #x10 first-byte)))
-         (bytevector-uint-ref (get-bytevector-n port 4) 0 (endianness big) 4))
-        (else
-         (error 'read-element-id
-                "not an Element ID"))))
-
-(define (read-element-length port)
+(define (get-element-data-length port)
   (define first-byte (lookahead-u8 port))
+  (define data-length
+    (cond ((logtest #x80 first-byte) 1)
+          ((logtest #x40 first-byte) 2)
+          ((logtest #x20 first-byte) 3)
+          ((logtest #x10 first-byte) 4)
+          ((logtest #x08 first-byte) 5)
+          ((logtest #x04 first-byte) 6)
+          ((logtest #x02 first-byte) 7)
+          ((logtest #x01 first-byte) 8)
+          (else
+           (error 'parse-element-length
+                  "not a Element length"))))
 
-  (cond ((not (= 0 (bitwise-and #x80 first-byte)))
-         (bitwise-xor (get-u8 port) #x80))
+  (bit-extract
+   (bytevector-uint-ref
+    (get-bytevector-n port data-length) 0 (endianness big) data-length)
+   0
+   (- (* 8 data-length) 1)))
 
-        ((not (= 0 (bitwise-and #x40 first-byte)))
-         (let ((bv (get-bytevector-n port 2)))
-           (bytevector-u8-set! bv 0 (bitwise-xor #x40 first-byte))
-           (bytevector-uint-ref bv 0 (endianness big) 2)))
+(define (parse-element-data bv type length)
+  (case type
+    ((uinteger)
+     (bytevector-uint-ref bv 0 (endianness big) length))
+    ((float)
+     #f)
+    ((binary)
+     #f)
+    ((utf-8)
+     #f)
+    ((string)
+     (utf8->string bv))
+    ((date)
+     #f)))
 
-        ((not (= 0 (bitwise-and #x20 first-byte)))
-         (let ((bv (get-bytevector-n port 3)))
-           (+ (* (bitwise-xor #x20 (bytevector-u8-ref bv 0)) (expt 2 16))
-              (bytevector-uint-ref bv 1 (endianness big) 2))))
+(define (parse-element port seed)
+  (display (format #f "~a\n" seed))
+  (if (eof-object? port)
+      (reverse seed)
+      (let ((element-id (get-element-id port))
+            (element-data-length (get-element-data-length port)))
+        (receive (element-name element-type)
+            (lookup-element element-id)
+          (if (equal? element-type 'master)
+              (parse-element port (append (list element-name) seed))
+              (let ((element-data (parse-element-data
+                                   (get-bytevector-n port element-data-length)
+                                   element-type
+                                   element-data-length)))
+                (parse-element port (cons (list element-name element-data) seed))))))))
 
-        ((not (= 0 (bitwise-and #x10 first-byte)))
-         (let ((bv (get-bytevector-n port 4)))
-           (bytevector-u8-set! bv 0 (bitwise-xor #x10 first-byte))
-           (bytevector-uint-ref bv 0 (endianness big) 4)))
+(define matroska-elements
+  (call-with-input-file "matroska.xml"
+    (λ (port)
+      (xml->sxml port #:trim-whitespace? #t))))
 
-        ((not (= 0 (bitwise-and #x08 first-byte)))
-         (let ((bv (get-bytevector-n port 5)))
-           (+ (* (bitwise-xor #x08 (bytevector-u8-ref bv 0)) (expt 2 32))
-              (bytevector-uint-ref bv 1 (endianness big) 4))))
+(define (lookup-element id)
+  (define element (car ((sxpath `(// (element (@ id (equal? ,(format #f "0x~:@(~x~)" id)))))) matroska-elements)))
+  (sxml-match element
+   [(element (@ (type ,type) (name ,name) (multiple ,multiple) (minver ,minver)
+                (mandatory ,mandatory) (level ,level) (id ,id))
+      ,doc)
+    (values (string->symbol name)
+            (string->symbol type))]
+   [(element (@ (type ,type) (name ,name) (minver ,minver)
+                (mandatory ,mandatory) (level ,level) (id ,id) (default ,default))
+      ,doc)
+    (values (string->symbol name)
+            (string->symbol type))]))
 
-        ((not (= 0 (bitwise-and #x04 first-byte)))
-         (let ((bv (get-bytevector-n port 6)))
-           (+ (* (bitwise-xor #x04 (bytevector-uint-ref bv 0 (endianness big) 2)) (expt 2 32))
-              (bytevector-uint-ref bv 2 (endianness big) 4))))
-
-        ((not (= 0 (bitwise-and #x02 first-byte)))
-         (let ((bv (get-bytevector-n port 7)))
-           (+ (* (bitwise-xor #x02 (bytevector-u8-ref bv 0)) (expt 2 48))
-              (* (bytevector-uint-ref bv 1 (endianness big) 2) (expt 2 32))
-              (bytevector-uint-ref bv 3 (endianness big) 4))))
-
-        ((not (= 0 (bitwise-and #x01 first-byte)))
-         (let ((bv (get-bytevector-n port 8)))
-           (bytevector-u8-set! bv 0 (bitwise-xor #x01 first-byte))
-           (bytevector-uint-ref bv 0 (endianness big) 8)))
-
-        (else
-         (error 'read-element-length
-                "not an Element length"))))
-
-(define (read-element port)
-  (let ((element-id (read-element-id port))
-        (element-length (read-element-length port)))
-    (format #t "length: ~a\n" element-length)
-    (cons element-id (get-bytevector-n port element-length))))
+(define (read-matroska-file filename)
+  (call-with-input-file filename get-bytevector-all))
